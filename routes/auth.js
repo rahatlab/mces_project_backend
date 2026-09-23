@@ -2,9 +2,11 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { JWT_SECRET } = require('../middleware/auth');
 const User = require('../models/User');
 const dbHelper = require('../models/modelHelper');
+const { sendEmail } = require('../config/email');
 
 // Helper to seed/ensure admin exists
 const ensureAdminExists = async () => {
@@ -17,7 +19,8 @@ const ensureAdminExists = async () => {
         name: 'System Admin',
         email: adminEmail,
         password: hashedPassword,
-        role: 'admin'
+        role: 'admin',
+        isEmailVerified: true
       });
       console.log('seeded admin account admin@mces.com / admin');
     }
@@ -40,11 +43,34 @@ router.post('/register', async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
     const user = await dbHelper.create(User, 'users', {
       name,
       email,
       password: hashedPassword,
-      role: 'user'
+      role: 'user',
+      isEmailVerified: false,
+      verificationToken,
+      verificationTokenExpiry
+    });
+
+    // Send verification email
+    const verifyUrl = `${process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'}/verify-email?token=${verificationToken}`;
+    await sendEmail({
+      to: email,
+      subject: 'MCES - Email Verification',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #0d9488;">MCES International</h2>
+          <p>আপনার অ্যাকাউন্ট তৈরি করা হয়েছে।</p>
+          <p>নিচের বাটনে ক্লিক করে আপনার ইমেইল ভেরিফাই করুন:</p>
+          <a href="${verifyUrl}" style="display: inline-block; padding: 12px 24px; background: #0d9488; color: white; text-decoration: none; border-radius: 8px; margin: 16px 0;">ইমেইল ভেরিফাই করুন</a>
+          <p style="color: #666; font-size: 12px;">এই লিংক ২৪ ঘণ্টার জন্য বৈধ।</p>
+          <p style="color: #666; font-size: 12px;">আপনি এই ইমেইলটি অনুরোধ না করে থাকলে এটি উপেক্ষা করুন।</p>
+        </div>
+      `
     });
 
     const token = jwt.sign({ id: user._id || user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -54,8 +80,10 @@ router.post('/register', async (req, res) => {
         id: user._id || user.id,
         name: user.name,
         email: user.email,
-        role: user.role
-      }
+        role: user.role,
+        isEmailVerified: false
+      },
+      message: 'Verification email sent. Please check your inbox.'
     });
   } catch (error) {
     console.error('Register error:', error);
@@ -81,17 +109,16 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid email or password' });
     }
 
-    // Handle password verification
-    let isMatch = false;
-    // Bypassing bcrypt if user tries admin credentials directly (or standard bcrypt match)
-    if (email === 'admin@mces.com' && password === 'admin') {
-      isMatch = true;
-    } else {
-      isMatch = await bcrypt.compare(password, user.password);
-    }
+    // Password verification (no bypass - dynamic password)
+    const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid email or password' });
+    }
+
+    // Check email verification for non-admin users
+    if (user.role !== 'admin' && !user.isEmailVerified) {
+      return res.status(403).json({ error: 'Email not verified. Please check your inbox.' });
     }
 
     const token = jwt.sign({ id: user._id || user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -101,7 +128,8 @@ router.post('/login', async (req, res) => {
         id: user._id || user.id,
         name: user.name,
         email: user.email,
-        role: user.role
+        role: user.role,
+        isEmailVerified: user.isEmailVerified
       }
     });
   } catch (error) {
@@ -134,10 +162,156 @@ router.get('/me', async (req, res) => {
       id: user._id || user.id,
       name: user.name,
       email: user.email,
-      role: user.role
+      role: user.role,
+      isEmailVerified: user.isEmailVerified
     });
   } catch (error) {
     res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
+// POST /api/auth/send-verification
+router.post('/send-verification', async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    const user = await dbHelper.findOne(User, 'users', { email });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.isEmailVerified) {
+      return res.status(400).json({ error: 'Email already verified' });
+    }
+
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    user.verificationToken = verificationToken;
+    user.verificationTokenExpiry = verificationTokenExpiry;
+    await user.save();
+
+    const verifyUrl = `${process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'}/verify-email?token=${verificationToken}`;
+    await sendEmail({
+      to: email,
+      subject: 'MCES - Email Verification',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #0d9488;">MCES International</h2>
+          <p>নিচের বাটনে ক্লিক করে আপনার ইমেইল ভেরিফাই করুন:</p>
+          <a href="${verifyUrl}" style="display: inline-block; padding: 12px 24px; background: #0d9488; color: white; text-decoration: none; border-radius: 8px; margin: 16px 0;">ইমেইল ভেরিফাই করুন</a>
+          <p style="color: #666; font-size: 12px;">এই লিংক ২৪ ঘণ্টার জন্য বৈধ।</p>
+        </div>
+      `
+    });
+
+    res.json({ message: 'Verification email sent' });
+  } catch (error) {
+    console.error('Send verification error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/auth/verify-email/:token
+router.get('/verify-email/:token', async (req, res) => {
+  const { token } = req.params;
+
+  try {
+    const user = await dbHelper.findOne(User, 'users', { verificationToken: token });
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid verification token' });
+    }
+
+    if (user.verificationTokenExpiry < new Date()) {
+      return res.status(400).json({ error: 'Verification token expired' });
+    }
+
+    user.isEmailVerified = true;
+    user.verificationToken = null;
+    user.verificationTokenExpiry = null;
+    await user.save();
+
+    res.json({ message: 'Email verified successfully' });
+  } catch (error) {
+    console.error('Verify email error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/forgot-password
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    const user = await dbHelper.findOne(User, 'users', { email });
+    if (!user) {
+      // Don't reveal if user exists or not
+      return res.json({ message: 'If the email exists, a reset link has been sent.' });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetTokenExpiry = new Date(Date.now() + 1 * 60 * 60 * 1000); // 1 hour
+
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = resetTokenExpiry;
+    await user.save();
+
+    const resetUrl = `${process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}`;
+    await sendEmail({
+      to: email,
+      subject: 'MCES - Password Reset Request',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #0d9488;">MCES International</h2>
+          <p>আপনি পাসওয়ার্ড রিসেট অনুরোধ করেছেন।</p>
+          <p>নিচের বাটনে ক্লিক করে নতুন পাসওয়ার্ড সেট করুন:</p>
+          <a href="${resetUrl}" style="display: inline-block; padding: 12px 24px; background: #0d9488; color: white; text-decoration: none; border-radius: 8px; margin: 16px 0;">পাসওয়ার্ড রিসেট করুন</a>
+          <p style="color: #666; font-size: 12px;">এই লিংক ১ ঘণ্টার জন্য বৈধ।</p>
+          <p style="color: #666; font-size: 12px;">আপনি এই অনুরোধ না করে থাকলে এটি উপেক্ষা করুন।</p>
+        </div>
+      `
+    });
+
+    res.json({ message: 'If the email exists, a reset link has been sent.' });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/auth/reset-password
+router.post('/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Token and new password are required' });
+  }
+
+  try {
+    const user = await dbHelper.findOne(User, 'users', { resetToken: token });
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid reset token' });
+    }
+
+    if (user.resetTokenExpiry < new Date()) {
+      return res.status(400).json({ error: 'Reset token expired' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    user.resetToken = null;
+    user.resetTokenExpiry = null;
+    await user.save();
+
+    res.json({ message: 'Password reset successful' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
