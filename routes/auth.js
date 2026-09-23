@@ -356,4 +356,29 @@ router.post('/change-password', async (req, res) => {
   }
 });
 
+// POST /api/auth/promote-admin (one-time use, protected by secret key)
+router.post('/promote-admin', async (req, res) => {
+  const { email, secretKey } = req.body;
+
+  if (secretKey !== 'mces_admin_promote_2026') {
+    return res.status(403).json({ error: 'Invalid secret key' });
+  }
+
+  try {
+    const user = await dbHelper.findOne(User, 'users', { email });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found. Register first.' });
+    }
+
+    user.role = 'admin';
+    user.isEmailVerified = true;
+    await user.save();
+
+    res.json({ message: `${email} is now admin!`, role: user.role });
+  } catch (error) {
+    console.error('Promote admin error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = { router, ensureAdminExists };
