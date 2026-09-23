@@ -8,27 +8,6 @@ const User = require('../models/User');
 const dbHelper = require('../models/modelHelper');
 const { sendEmail } = require('../config/email');
 
-// Helper to seed/ensure admin exists
-const ensureAdminExists = async () => {
-  try {
-    const adminEmail = 'admin@mces.com';
-    const existing = await dbHelper.findOne(User, 'users', { email: adminEmail });
-    if (!existing) {
-      const hashedPassword = await bcrypt.hash('admin', 10);
-      await dbHelper.create(User, 'users', {
-        name: 'System Admin',
-        email: adminEmail,
-        password: hashedPassword,
-        role: 'admin',
-        isEmailVerified: true
-      });
-      console.log('seeded admin account admin@mces.com / admin');
-    }
-  } catch (error) {
-    console.error('Failed to seed admin user:', error);
-  }
-};
-
 // POST /api/auth/register
 router.post('/register', async (req, res) => {
   const { name, email, password } = req.body;
@@ -99,11 +78,6 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    // Make sure admin is seeded if it's an admin login attempt
-    if (email === 'admin@mces.com') {
-      await ensureAdminExists();
-    }
-
     const user = await dbHelper.findOne(User, 'users', { email });
     if (!user) {
       return res.status(400).json({ error: 'Invalid email or password' });
@@ -148,10 +122,6 @@ router.get('/me', async (req, res) => {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    // Seed admin if it's admin's token
-    if (decoded.role === 'admin') {
-      await ensureAdminExists();
-    }
 
     const user = await dbHelper.findById(User, 'users', decoded.id);
     if (!user) {
@@ -381,4 +351,4 @@ router.post('/promote-admin', async (req, res) => {
   }
 });
 
-module.exports = { router, ensureAdminExists };
+module.exports = { router };
